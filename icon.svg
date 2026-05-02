@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
+  <rect width="192" height="192" rx="32" fill="#0D0D0D"/>
+  <!-- Bus body -->
+  <rect x="28" y="68" width="136" height="76" rx="12" fill="#FF6200"/>
+  <!-- Windows -->
+  <rect x="42" y="82" width="28" height="22" rx="4" fill="rgba(255,255,255,0.85)"/>
+  <rect x="82" y="82" width="28" height="22" rx="4" fill="rgba(255,255,255,0.85)"/>
+  <rect x="122" y="82" width="28" height="22" rx="4" fill="rgba(255,255,255,0.85)"/>
+  <!-- Door -->
+  <rect x="42" y="112" width="20" height="32" rx="3" fill="rgba(0,0,0,0.3)"/>
+  <!-- Wheels -->
+  <circle cx="62" cy="152" r="18" fill="#1A1A1A" stroke="#FF6200" stroke-width="4"/>
+  <circle cx="62" cy="152" r="8" fill="#333"/>
+  <circle cx="130" cy="152" r="18" fill="#1A1A1A" stroke="#FF6200" stroke-width="4"/>
+  <circle cx="130" cy="152" r="8" fill="#333"/>
+  <!-- Headlights -->
+  <circle cx="164" cy="100" r="8" fill="#FFB612" opacity="0.9"/>
+  <circle cx="164" cy="124" r="8" fill="#FFB612" opacity="0.9"/>
+  <!-- Orbit dots -->
+  <circle cx="96" cy="28" r="6" fill="#FF6200" opacity="0.7"/>
+  <circle cx="156" cy="48" r="4" fill="#FFB612" opacity="0.6"/>
+  <circle cx="36" cy="48" r="4" fill="#006F5C" opacity="0.6"/>
+</svg>
