@@ -35,10 +35,11 @@ export const MODE_EMOJI: Record<TransitMode, string> = {
 export const POLL_INTERVAL_VEHICLES = 20_000
 export const POLL_INTERVAL_ALERTS = 60_000
 
+// Philadelphia City Hall — Broad & Market
 export const PHILLY_CENTER = {
-  lat: 39.9526,
-  lng: -75.1652,
-  alt: 18000,
+  lat: 39.9524,
+  lng: -75.1636,
+  alt: 1500,
 }
 
 export const SASSY_LINES = [

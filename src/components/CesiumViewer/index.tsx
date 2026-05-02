@@ -70,7 +70,19 @@ export default function CesiumViewer() {
       viewer.scene.skyAtmosphere.hueShift = 0.1
     }
 
-    // Dramatic fly-in to Philadelphia
+    // Stylized 3D OSM buildings (requires Ion token)
+    if (ionToken) {
+      Cesium.createOsmBuildingsAsync().then((tileset) => {
+        if (!viewer.isDestroyed()) {
+          viewer.scene.primitives.add(tileset)
+          tileset.style = new Cesium.Cesium3DTileStyle({
+            color: "color('#1e2a3a', 0.95)",
+          })
+        }
+      }).catch(() => { /* skip if Ion unavailable */ })
+    }
+
+    // Dramatic fly-in to City Hall, angled to show buildings
     viewer.camera.flyTo({
       destination: Cesium.Cartesian3.fromDegrees(
         PHILLY_CENTER.lng,
@@ -78,11 +90,11 @@ export default function CesiumViewer() {
         PHILLY_CENTER.alt
       ),
       orientation: {
-        heading: Cesium.Math.toRadians(10),
-        pitch: Cesium.Math.toRadians(-40),
+        heading: Cesium.Math.toRadians(15),
+        pitch: Cesium.Math.toRadians(-30),
         roll: 0,
       },
-      duration: 2.5,
+      duration: 3.0,
       easingFunction: Cesium.EasingFunction.QUADRATIC_IN_OUT,
     })
 
