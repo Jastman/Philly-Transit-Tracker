@@ -1,6 +1,12 @@
 import type { TransitMode } from './types/transit'
 
-export const SEPTA_API_BASE = 'https://www3.septa.org/api'
+// SEPTA API doesn't send CORS headers, so we proxy through corsproxy.io for browser access.
+// In local dev, Vite's proxy (see vite.config.ts) intercepts /septa-api/ → www3.septa.org
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const IS_DEV = (import.meta as any).env?.DEV === true
+export const SEPTA_API_BASE = IS_DEV
+  ? '/septa-api'
+  : 'https://corsproxy.io/?https://www3.septa.org/api'
 
 export const BUS_ROUTES = [
   '1', '2', '5', '9', '12', '17', '21', '23', '25', '29',

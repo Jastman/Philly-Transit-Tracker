@@ -10,6 +10,13 @@ export default defineConfig({
   ],
   server: {
     port: 5173,
+    proxy: {
+      '/septa-api': {
+        target: 'https://www3.septa.org/api',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/septa-api/, ''),
+      },
+    },
   },
   build: {
     chunkSizeWarningLimit: 5000,
