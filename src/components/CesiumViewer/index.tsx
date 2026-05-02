@@ -18,25 +18,30 @@ import {
 } from './selectedRoute'
 import { PHILLY_CENTER } from '../../config'
 
-// Compute a camera destination that places the vehicle in the upper ~30% of the
-// viewport so it stays visible above the bottom info panel.  The camera sits
-// ~1 km "behind" the vehicle (opposite its heading direction) at 2000 m altitude.
+// Camera geometry (portrait phone, VFOV ≈ 91°, half = 45.5°, pitch = -55°):
+//   At altitude=1500 m, OFFSET=0.020° (≈2226 m behind vehicle):
+//   vehicle angle below horiz = arctan(1500/2226) ≈ 33.97°
+//   screen position above center = 55° − 33.97° = 21.03°
+//   fraction from top = 50% − (21.03/45.5)*50% ≈ 27%
+// → vehicle lands at ~27% from top, safely above the info panel.
 function followCameraFor(
   lat: number,
   lng: number,
   headingDeg: number
 ): { destination: Cesium.Cartesian3; headingRad: number } {
   const H = Cesium.Math.toRadians(headingDeg)
-  const OFFSET = 0.009  // ~1 km in degrees
+  const OFFSET = 0.020  // ~2.2 km behind vehicle in heading direction
   return {
     destination: Cesium.Cartesian3.fromDegrees(
       lng - Math.sin(H) * OFFSET,
       lat - Math.cos(H) * OFFSET,
-      2000
+      1500
     ),
     headingRad: Cesium.Math.toRadians(headingDeg),
   }
 }
+
+const TRACKING_LERP = 0.035  // smooth follow: ~95% convergence in ~1.5 s at 60 fps
 
 export default function CesiumViewer() {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -46,6 +51,8 @@ export default function CesiumViewer() {
   const routeSourceRef = useRef<Cesium.CustomDataSource | null>(null)
   const prevSelectedRef = useRef<string | null>(null)
   const trackingVehicleRef = useRef<string | null>(null)
+  const trackingHeadingRef = useRef<number>(0)
+  const flyingRef = useRef(false)  // true while flyTo is animating
 
   const vehicles = useTransitStore((s) => s.vehicles)
   const filters = useTransitStore((s) => s.filters)
@@ -137,29 +144,85 @@ export default function CesiumViewer() {
     viewer.dataSources.add(rs)
     routeSourceRef.current = rs
 
+    // ── Per-frame smooth camera tracking ─────────────────────────────────────
+    // Uses SampledPositionProperty interpolation from entityManager for buttery
+    // smooth follow — no 20-second jumps, no flyTo conflicts.
+    const postRenderCb = () => {
+      if (flyingRef.current) return  // let the initial flyTo complete first
+
+      const trackingId = trackingVehicleRef.current
+      if (!trackingId || !dataSourceRef.current) return
+
+      const entity = dataSourceRef.current.entities.getById(trackingId)
+      if (!entity?.position) return
+
+      const entityPos = entity.position.getValue(viewer.clock.currentTime)
+      if (!entityPos) return
+
+      const carto = Cesium.Cartographic.fromCartesian(entityPos)
+      const lat = Cesium.Math.toDegrees(carto.latitude)
+      const lng = Cesium.Math.toDegrees(carto.longitude)
+
+      const { destination, headingRad } = followCameraFor(lat, lng, trackingHeadingRef.current)
+
+      const cam = viewer.camera
+      const dx = destination.x - cam.position.x
+      const dy = destination.y - cam.position.y
+      const dz = destination.z - cam.position.z
+
+      // Stop lerping when close enough (~20 m)
+      if (dx * dx + dy * dy + dz * dz < 400) return
+
+      cam.setView({
+        destination: new Cesium.Cartesian3(
+          cam.position.x + dx * TRACKING_LERP,
+          cam.position.y + dy * TRACKING_LERP,
+          cam.position.z + dz * TRACKING_LERP,
+        ),
+        orientation: {
+          heading: headingRad,
+          pitch: Cesium.Math.toRadians(-55),
+          roll: 0,
+        },
+      })
+    }
+
+    viewer.scene.postRender.addEventListener(postRenderCb)
+
+    // ── Click handler ─────────────────────────────────────────────────────────
     const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas)
     handler.setInputAction(
       (e: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
         const picked = viewer.scene.pick(e.position)
         if (Cesium.defined(picked) && picked.id instanceof Cesium.Entity) {
           const entityId = (picked.id as Cesium.Entity).id as string
+          // Skip clicks on route/health overlay entities
+          if (entityId.startsWith('corridor-') || entityId.startsWith('ring-') ||
+              entityId.startsWith('selected-') || entityId.startsWith('station-')) return
+
           const vehicle = getVehicleById(entityId)
           if (vehicle) {
             selectVehicle(vehicle)
             trackingVehicleRef.current = vehicle.id
-            // Position camera behind vehicle so it appears in the upper half
+            trackingHeadingRef.current = vehicle.heading
+
+            // Quick flyTo to snap into follow position; postRender takes over after
+            flyingRef.current = true
             const { destination, headingRad } = followCameraFor(
               vehicle.lat, vehicle.lng, vehicle.heading
             )
             viewer.camera.flyTo({
               destination,
-              orientation: { heading: headingRad, pitch: Cesium.Math.toRadians(-50), roll: 0 },
-              duration: 1.5,
+              orientation: { heading: headingRad, pitch: Cesium.Math.toRadians(-55), roll: 0 },
+              duration: 0.8,
+              complete: () => { flyingRef.current = false },
+              cancel: () => { flyingRef.current = false },
             })
           }
         } else {
           selectVehicle(null)
           trackingVehicleRef.current = null
+          flyingRef.current = false
         }
       },
       Cesium.ScreenSpaceEventType.LEFT_CLICK
@@ -167,6 +230,7 @@ export default function CesiumViewer() {
 
     return () => {
       handler.destroy()
+      viewer.scene.postRender.removeEventListener(postRenderCb)
       if (viewer && !viewer.isDestroyed()) {
         clearEntities(ds)
         clearDelayRings(hs)
@@ -181,32 +245,20 @@ export default function CesiumViewer() {
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Sync vehicles + health overlays + camera follow on each poll
+  // Sync vehicles + health overlays each poll; update tracking heading
   useEffect(() => {
     if (!dataSourceRef.current || !healthSourceRef.current) return
     syncVehicles(dataSourceRef.current, vehicles, filters)
     syncDelayRings(healthSourceRef.current, vehicles)
     syncCorridorLines(healthSourceRef.current, vehicles)
 
-    // Follow selected vehicle
     const trackingId = trackingVehicleRef.current
     if (trackingId) {
       const updated = vehicles.find((v) => v.id === trackingId)
       if (updated) {
+        // Keep heading current so postRender orients camera correctly
+        trackingHeadingRef.current = updated.heading
         if (routeSourceRef.current) updateSelectedRoutePulse(routeSourceRef.current, updated)
-
-        const viewer = viewerRef.current
-        if (viewer && !viewer.isDestroyed()) {
-          const { destination, headingRad } = followCameraFor(
-            updated.lat, updated.lng, updated.heading
-          )
-          // Slow drift — vehicle updates every 20s so 5s duration feels smooth
-          viewer.camera.flyTo({
-            destination,
-            orientation: { heading: headingRad, pitch: Cesium.Math.toRadians(-50), roll: 0 },
-            duration: 5.0,
-          })
-        }
       }
     }
   }, [vehicles, filters])
@@ -223,6 +275,7 @@ export default function CesiumViewer() {
     } else {
       prevSelectedRef.current = null
       trackingVehicleRef.current = null
+      flyingRef.current = false
       if (routeSourceRef.current) hideSelectedRoute(routeSourceRef.current)
     }
   }, [selectedVehicle])
