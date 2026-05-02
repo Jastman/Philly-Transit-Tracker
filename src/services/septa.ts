@@ -1,114 +1,238 @@
 import type { Vehicle, Alert, TransitMode } from '../types/transit'
 import { SEPTA_API_BASE } from '../config'
 
+// ─── TransitViewAll response (all buses + trolleys in one call) ──────────────
+
 interface TransitViewVehicle {
-  lng: string
-  lat: string
-  label: string
-  route_id?: string
-  trip_id?: string
+  VehicleID: string
   BlockID?: string
+  Direction?: string
   destination?: string
-  heading?: string
-  late?: number | string
+  Destination?: string
+  heading?: string | number
+  Heading?: string | number
+  Latitude?: string | number
+  Longitude?: string | number
+  lat?: string | number
+  lng?: string | number
+  late?: string | number
+  label?: string
+  route_id?: string
+  RouteID?: string
+  trip_id?: string
+  Offset?: number
 }
 
-interface TransitViewResponse {
+interface TransitViewAllResponse {
   bus?: TransitViewVehicle[]
   trolley?: TransitViewVehicle[]
   train?: TransitViewVehicle[]
   el?: TransitViewVehicle[]
+  // api.septa.org may return a flat array or a nested object
+  routes?: Record<string, TransitViewVehicle[]>
+  [key: string]: unknown
 }
+
+// ─── TrainView response (Regional Rail) ─────────────────────────────────────
 
 interface TrainViewVehicle {
   lat: string
-  lon: string
+  lon?: string
+  lng?: string
   trainno: string
   service?: string
   dest?: string
+  destination?: string
   line?: string
   late?: number | string
-  SOURCE?: string
 }
 
-function parseNum(val: string | number | undefined, fallback = 0): number {
-  if (val === undefined || val === null) return fallback
-  const n = typeof val === 'number' ? val : parseFloat(String(val))
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function num(v: string | number | undefined, fallback = 0): number {
+  if (v === undefined || v === null) return fallback
+  const n = typeof v === 'number' ? v : parseFloat(String(v))
   return isNaN(n) ? fallback : n
 }
 
-function parseHeading(val: string | number | undefined): number {
-  const h = parseNum(val)
+function heading(v: string | number | undefined): number {
+  const h = num(v)
   return ((h % 360) + 360) % 360
 }
 
-function parseLate(val: number | string | undefined): number {
-  if (val === undefined || val === null) return 0
-  const n = typeof val === 'number' ? val : parseInt(String(val), 10)
+function late(v: number | string | undefined): number {
+  if (v === undefined || v === null) return 0
+  const n = typeof v === 'number' ? v : parseInt(String(v), 10)
   return isNaN(n) ? 0 : n
 }
 
-export async function fetchRouteVehicles(route: string, mode: TransitMode): Promise<Vehicle[]> {
+function validCoord(lat: number, lng: number): boolean {
+  return lat !== 0 && lng !== 0 && !isNaN(lat) && !isNaN(lng) &&
+    Math.abs(lat) <= 90 && Math.abs(lng) <= 180
+}
+
+function mapTransitViewVehicle(
+  v: TransitViewVehicle,
+  route: string,
+  mode: TransitMode,
+  idx: number
+): Vehicle | null {
+  const lat = num(v.Latitude ?? v.lat)
+  const lng = num(v.Longitude ?? v.lng)
+  if (!validCoord(lat, lng)) return null
+
+  return {
+    id: `${mode}-${route}-${v.VehicleID || v.BlockID || v.label || idx}`,
+    mode,
+    route: v.route_id ?? v.RouteID ?? route,
+    lat,
+    lng,
+    heading: heading(v.Heading ?? v.heading),
+    label: v.VehicleID || v.label || String(idx),
+    destination: v.Destination ?? v.destination,
+    late: late(v.late ?? v.Offset),
+    timestamp: Date.now(),
+  }
+}
+
+// ─── Fetch all buses and trolleys in one shot ────────────────────────────────
+
+export async function fetchAllSurfaceVehicles(): Promise<Vehicle[]> {
+  const results: Vehicle[] = []
+
+  // Try new api.septa.org TransitViewAll first
+  try {
+    const res = await fetch(`${SEPTA_API_BASE}/TransitView/all`, {
+      signal: AbortSignal.timeout(10000),
+    })
+    if (res.ok) {
+      const data: TransitViewAllResponse = await res.json()
+      const entries = extractVehicleEntries(data)
+      for (const { vehicles, route, mode } of entries) {
+        for (let i = 0; i < vehicles.length; i++) {
+          const v = mapTransitViewVehicle(vehicles[i], route, mode, i)
+          if (v) results.push(v)
+        }
+      }
+      if (results.length > 0) return results
+    }
+  } catch { /* fall through */ }
+
+  // Fallback: legacy www3.septa.org TransitViewAll
   try {
     const res = await fetch(
-      `${SEPTA_API_BASE}/TransitView/index.php?route=${encodeURIComponent(route)}`,
-      { signal: AbortSignal.timeout(8000) }
+      'https://corsproxy.io/?https://www3.septa.org/api/TransitViewAll/index.php',
+      { signal: AbortSignal.timeout(10000) }
     )
-    if (!res.ok) return []
+    if (res.ok) {
+      const data: TransitViewAllResponse = await res.json()
+      const entries = extractVehicleEntries(data)
+      for (const { vehicles, route, mode } of entries) {
+        for (let i = 0; i < vehicles.length; i++) {
+          const v = mapTransitViewVehicle(vehicles[i], route, mode, i)
+          if (v) results.push(v)
+        }
+      }
+    }
+  } catch { /* give up */ }
 
-    const data: TransitViewResponse = await res.json()
-    const vehicles: TransitViewVehicle[] = [
-      ...(data.bus ?? []),
-      ...(data.trolley ?? []),
-      ...(data.train ?? []),
-      ...(data.el ?? []),
-    ]
-
-    return vehicles
-      .map((v, i): Vehicle => ({
-        id: `${route}-${v.label || i}-${v.trip_id || v.BlockID || i}`,
-        mode,
-        route,
-        lat: parseNum(v.lat),
-        lng: parseNum(v.lng),
-        heading: parseHeading(v.heading),
-        label: v.label || route,
-        destination: v.destination,
-        late: parseLate(v.late),
-        timestamp: Date.now(),
-      }))
-      .filter(v => v.lat !== 0 && v.lng !== 0 && !isNaN(v.lat) && !isNaN(v.lng))
-  } catch {
-    return []
-  }
+  return results
 }
+
+interface VehicleEntry {
+  vehicles: TransitViewVehicle[]
+  route: string
+  mode: TransitMode
+}
+
+function extractVehicleEntries(data: TransitViewAllResponse): VehicleEntry[] {
+  const out: VehicleEntry[] = []
+
+  // Handle flat arrays by key (bus / trolley / train / el)
+  const TROLLEY_ROUTES = new Set(['10', '11', '13', '15', '34', '36'])
+  const SUBWAY_ROUTES = new Set(['BSL', 'MFL'])
+
+  function modeForRoute(routeId: string, defaultMode: TransitMode): TransitMode {
+    if (SUBWAY_ROUTES.has(routeId)) return 'subway'
+    if (TROLLEY_ROUTES.has(routeId)) return 'trolley'
+    return defaultMode
+  }
+
+  function processArray(arr: TransitViewVehicle[], defaultMode: TransitMode) {
+    // Group by route_id if available, else treat as single group
+    const byRoute = new Map<string, TransitViewVehicle[]>()
+    for (const v of arr) {
+      const r = v.route_id ?? v.RouteID ?? 'unknown'
+      if (!byRoute.has(r)) byRoute.set(r, [])
+      byRoute.get(r)!.push(v)
+    }
+    for (const [route, vehicles] of byRoute) {
+      out.push({ vehicles, route, mode: modeForRoute(route, defaultMode) })
+    }
+  }
+
+  if (Array.isArray(data.bus)) processArray(data.bus, 'bus')
+  if (Array.isArray(data.trolley)) processArray(data.trolley, 'trolley')
+  if (Array.isArray(data.train)) processArray(data.train, 'subway')
+  if (Array.isArray(data.el)) processArray(data.el, 'subway')
+
+  // Handle routes map (api.septa.org may return { routes: { "1": [...], "2": [...] } })
+  if (data.routes && typeof data.routes === 'object') {
+    for (const [route, vehicles] of Object.entries(data.routes)) {
+      if (Array.isArray(vehicles)) {
+        out.push({ vehicles, route, mode: modeForRoute(route, 'bus') })
+      }
+    }
+  }
+
+  // Handle top-level route keys (e.g., { "1": [...], "33": [...] })
+  if (out.length === 0) {
+    for (const [key, value] of Object.entries(data)) {
+      if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'object') {
+        const arr = value as TransitViewVehicle[]
+        const mode = modeForRoute(key, 'bus')
+        out.push({ vehicles: arr, route: key, mode })
+      }
+    }
+  }
+
+  return out
+}
+
+// ─── Regional Rail ───────────────────────────────────────────────────────────
 
 export async function fetchRailVehicles(): Promise<Vehicle[]> {
-  try {
-    const res = await fetch(`${SEPTA_API_BASE}/TrainView/index.php`, {
-      signal: AbortSignal.timeout(8000),
-    })
-    if (!res.ok) return []
+  // Try new API first
+  for (const url of [
+    `${SEPTA_API_BASE}/TrainView`,
+    'https://corsproxy.io/?https://www3.septa.org/api/TrainView/index.php',
+  ]) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(8000) })
+      if (!res.ok) continue
+      const data: TrainViewVehicle[] = await res.json()
+      if (!Array.isArray(data)) continue
 
-    const data: TrainViewVehicle[] = await res.json()
-    return data
-      .map((v): Vehicle => ({
-        id: `rail-${v.trainno}`,
-        mode: 'rail',
-        route: v.line ?? v.service ?? 'Rail',
-        lat: parseNum(v.lat),
-        lng: parseNum(v.lon),
-        heading: 0,
-        label: v.trainno || 'Train',
-        destination: v.dest,
-        late: parseLate(v.late),
-        timestamp: Date.now(),
-      }))
-      .filter(v => v.lat !== 0 && v.lng !== 0 && !isNaN(v.lat) && !isNaN(v.lng))
-  } catch {
-    return []
+      return data
+        .map((v): Vehicle => ({
+          id: `rail-${v.trainno}`,
+          mode: 'rail',
+          route: v.line ?? v.service ?? 'Rail',
+          lat: num(v.lat),
+          lng: num(v.lon ?? v.lng),
+          heading: 0,
+          label: v.trainno || 'Train',
+          destination: v.dest ?? v.destination,
+          late: late(v.late),
+          timestamp: Date.now(),
+        }))
+        .filter((v) => validCoord(v.lat, v.lng))
+    } catch { /* try next */ }
   }
+  return []
 }
+
+// ─── Alerts ──────────────────────────────────────────────────────────────────
 
 interface AlertEntry {
   route_id?: string
@@ -117,40 +241,52 @@ interface AlertEntry {
   detour_message?: string
   isadvisory?: boolean | string
   isdetour?: boolean | string
+  message?: string
+  header_text?: string
+  description_text?: string
+  effect?: string
 }
 
-export async function fetchAlerts(): Promise<Alert[]> {
-  try {
-    const res = await fetch(`${SEPTA_API_BASE}/Alerts/index.php?json=1`, {
-      signal: AbortSignal.timeout(8000),
-    })
-    if (!res.ok) return []
+export async function fetchAlerts(): Promise<import('../types/transit').Alert[]> {
+  for (const url of [
+    `${SEPTA_API_BASE}/Alerts`,
+    'https://corsproxy.io/?https://www3.septa.org/api/Alerts/index.php?json=1',
+  ]) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(8000) })
+      if (!res.ok) continue
+      const data: Record<string, AlertEntry | AlertEntry[]> | AlertEntry[] = await res.json()
 
-    const data: Record<string, AlertEntry | AlertEntry[]> = await res.json()
-    const alerts: Alert[] = []
+      const alerts: import('../types/transit').Alert[] = []
 
-    for (const [key, value] of Object.entries(data)) {
-      const items = Array.isArray(value) ? value : [value]
-      for (const item of items) {
-        if (!item || typeof item !== 'object') continue
+      const processItem = (key: string, item: AlertEntry) => {
         const message =
-          item.advisory_message || item.current_message || item.detour_message || ''
-        if (!message || message.length < 5) continue
-
-        const isDetour = item.isdetour === true || item.isdetour === '1'
+          item.advisory_message || item.current_message || item.detour_message ||
+          item.message || item.header_text || item.description_text || ''
+        if (!message || message.length < 5) return
+        const isDetour = item.isdetour === true || item.isdetour === '1' || item.effect === 'DETOUR'
         const isAdvisory = item.isadvisory === true || item.isadvisory === '1'
-
         alerts.push({
           id: `${key}-${alerts.length}`,
-          route: item.route_id || key,
+          route: item.route_id ?? key,
           message: message.replace(/<[^>]*>/g, '').trim(),
           type: isDetour ? 'detour' : isAdvisory ? 'delay' : 'info',
         })
       }
-    }
 
-    return alerts.slice(0, 20)
-  } catch {
-    return []
+      if (Array.isArray(data)) {
+        data.forEach((item, i) => processItem(String(i), item))
+      } else {
+        for (const [key, value] of Object.entries(data)) {
+          const items = Array.isArray(value) ? value : [value]
+          items.forEach((item) => {
+            if (item && typeof item === 'object') processItem(key, item)
+          })
+        }
+      }
+
+      if (alerts.length > 0) return alerts.slice(0, 20)
+    } catch { /* try next */ }
   }
+  return []
 }

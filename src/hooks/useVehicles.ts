@@ -1,37 +1,20 @@
 import { useEffect } from 'react'
 import { useTransitStore } from '../store/transitStore'
-import { fetchRouteVehicles, fetchRailVehicles } from '../services/septa'
+import { fetchAllSurfaceVehicles, fetchRailVehicles } from '../services/septa'
 import { estimatePatcoPositions } from '../services/patco'
-import { BUS_ROUTES, TROLLEY_ROUTES, SUBWAY_ROUTES, POLL_INTERVAL_VEHICLES } from '../config'
-import type { Vehicle, TransitMode } from '../types/transit'
-
-interface RouteSpec { route: string; mode: TransitMode }
+import { POLL_INTERVAL_VEHICLES } from '../config'
+import type { Vehicle } from '../types/transit'
 
 async function fetchAll(onProgress: (p: number) => void): Promise<Vehicle[]> {
-  const specs: RouteSpec[] = [
-    ...BUS_ROUTES.map((r) => ({ route: r, mode: 'bus' as TransitMode })),
-    ...TROLLEY_ROUTES.map((r) => ({ route: r, mode: 'trolley' as TransitMode })),
-    ...SUBWAY_ROUTES.map((r) => ({ route: r, mode: 'subway' as TransitMode })),
-  ]
-
-  let done = 0
-  const total = specs.length + 1
-
-  const tick = () => onProgress(++done / total)
-
-  const [railResult, ...routeResults] = await Promise.allSettled([
-    fetchRailVehicles().then((v) => { tick(); return v }),
-    ...specs.map(({ route, mode }) =>
-      fetchRouteVehicles(route, mode).then((v) => { tick(); return v })
-    ),
+  // 2 API calls total: all buses/trolleys/subway + all rail
+  const [surfaceResult, railResult] = await Promise.allSettled([
+    fetchAllSurfaceVehicles().then((v) => { onProgress(0.5); return v }),
+    fetchRailVehicles().then((v) => { onProgress(1); return v }),
   ])
 
   const all: Vehicle[] = []
+  if (surfaceResult.status === 'fulfilled') all.push(...surfaceResult.value)
   if (railResult.status === 'fulfilled') all.push(...railResult.value)
-  for (const r of routeResults) {
-    if (r.status === 'fulfilled') all.push(...r.value)
-  }
-
   all.push(...estimatePatcoPositions())
   return all
 }
@@ -59,7 +42,6 @@ export function useVehicles() {
     }
 
     poll(true)
-
     return () => {
       mounted = false
       clearTimeout(timer)

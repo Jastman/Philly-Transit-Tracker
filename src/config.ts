@@ -1,21 +1,12 @@
 import type { TransitMode } from './types/transit'
 
-// SEPTA API doesn't send CORS headers, so we proxy through corsproxy.io for browser access.
-// In local dev, Vite's proxy (see vite.config.ts) intercepts /septa-api/ → www3.septa.org
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const IS_DEV = (import.meta as any).env?.DEV === true
-export const SEPTA_API_BASE = IS_DEV
-  ? '/septa-api'
-  : 'https://corsproxy.io/?https://www3.septa.org/api'
+// api.septa.org is the current supported SEPTA API with CORS enabled.
+// www3.septa.org is the legacy API (requires proxy for browser use).
+export const SEPTA_API_BASE = 'https://api.septa.org/api/v1'
 
-export const BUS_ROUTES = [
-  '1', '2', '5', '9', '12', '17', '21', '23', '25', '29',
-  '31', '33', '37', '40', '42', '44', '47', '52', '56', '60',
-  '65', '66',
-]
+// Legacy fallback (used only if the new API doesn't have an endpoint)
+export const SEPTA_LEGACY_BASE = 'https://www3.septa.org/api'
 
-export const TROLLEY_ROUTES = ['10', '11', '13', '15', '34', '36']
-export const SUBWAY_ROUTES = ['BSL', 'MFL']
 
 export const MODE_COLORS: Record<TransitMode, string> = {
   bus: '#0057A8',
