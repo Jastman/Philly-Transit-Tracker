@@ -9,13 +9,43 @@ import {
   highlightEntity,
   unhighlightEntity,
 } from './entityManager'
+import { syncDelayRings, clearDelayRings } from './routeHealth'
+import { syncCorridorLines, clearCorridorLines } from './corridorLines'
+import {
+  showSelectedRoute,
+  hideSelectedRoute,
+  updateSelectedRoutePulse,
+} from './selectedRoute'
 import { PHILLY_CENTER } from '../../config'
+
+// Compute a camera destination that places the vehicle in the upper ~30% of the
+// viewport so it stays visible above the bottom info panel.  The camera sits
+// ~1 km "behind" the vehicle (opposite its heading direction) at 2000 m altitude.
+function followCameraFor(
+  lat: number,
+  lng: number,
+  headingDeg: number
+): { destination: Cesium.Cartesian3; headingRad: number } {
+  const H = Cesium.Math.toRadians(headingDeg)
+  const OFFSET = 0.009  // ~1 km in degrees
+  return {
+    destination: Cesium.Cartesian3.fromDegrees(
+      lng - Math.sin(H) * OFFSET,
+      lat - Math.cos(H) * OFFSET,
+      2000
+    ),
+    headingRad: Cesium.Math.toRadians(headingDeg),
+  }
+}
 
 export default function CesiumViewer() {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewerRef = useRef<Cesium.Viewer | null>(null)
   const dataSourceRef = useRef<Cesium.CustomDataSource | null>(null)
+  const healthSourceRef = useRef<Cesium.CustomDataSource | null>(null)
+  const routeSourceRef = useRef<Cesium.CustomDataSource | null>(null)
   const prevSelectedRef = useRef<string | null>(null)
+  const trackingVehicleRef = useRef<string | null>(null)
 
   const vehicles = useTransitStore((s) => s.vehicles)
   const filters = useTransitStore((s) => s.filters)
@@ -30,7 +60,6 @@ export default function CesiumViewer() {
     const ionToken: string | undefined = (import.meta as any).env?.VITE_CESIUM_ION_TOKEN
     if (ionToken) Cesium.Ion.defaultAccessToken = ionToken
 
-    // Suppress deprecation warnings from old constructor form
     const viewer = new Cesium.Viewer(containerRef.current, {
       baseLayerPicker: false,
       geocoder: false,
@@ -42,14 +71,12 @@ export default function CesiumViewer() {
       fullscreenButton: false,
       infoBox: false,
       selectionIndicator: false,
-      // Use ellipsoid (no terrain) by default — works without Ion token
       terrainProvider: new Cesium.EllipsoidTerrainProvider(),
       creditContainer: document.createElement('div'),
     })
 
     viewerRef.current = viewer
 
-    // Set up OSM imagery
     viewer.imageryLayers.removeAll()
     viewer.imageryLayers.addImageryProvider(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -59,7 +86,6 @@ export default function CesiumViewer() {
       })
     )
 
-    // Dark night feel for globe
     viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString('#1a1a2e')
     viewer.scene.backgroundColor = Cesium.Color.fromCssColorString('#0d0d0d')
     viewer.scene.globe.depthTestAgainstTerrain = false
@@ -70,19 +96,20 @@ export default function CesiumViewer() {
       viewer.scene.skyAtmosphere.hueShift = 0.1
     }
 
-    // Stylized 3D OSM buildings (requires Ion token)
+    // Stylized OSM 3D buildings — dark navy tint to match app theme
     if (ionToken) {
       Cesium.createOsmBuildingsAsync().then((tileset) => {
-        if (!viewer.isDestroyed()) {
-          viewer.scene.primitives.add(tileset)
+        const v = viewerRef.current
+        if (v && !v.isDestroyed()) {
+          v.scene.primitives.add(tileset)
           tileset.style = new Cesium.Cesium3DTileStyle({
-            color: "color('#1e2a3a', 0.95)",
+            color: "color('#162032', 0.88)",
           })
         }
       }).catch(() => { /* skip if Ion unavailable */ })
     }
 
-    // Dramatic fly-in to City Hall, angled to show buildings
+    // Fly in to City Hall, angled to reveal buildings
     viewer.camera.flyTo({
       destination: Cesium.Cartesian3.fromDegrees(
         PHILLY_CENTER.lng,
@@ -91,19 +118,25 @@ export default function CesiumViewer() {
       ),
       orientation: {
         heading: Cesium.Math.toRadians(15),
-        pitch: Cesium.Math.toRadians(-30),
+        pitch: Cesium.Math.toRadians(-35),
         roll: 0,
       },
       duration: 3.0,
       easingFunction: Cesium.EasingFunction.QUADRATIC_IN_OUT,
     })
 
-    // Add vehicle data source
     const ds = new Cesium.CustomDataSource('vehicles')
     viewer.dataSources.add(ds)
     dataSourceRef.current = ds
 
-    // Click handler
+    const hs = new Cesium.CustomDataSource('health')
+    viewer.dataSources.add(hs)
+    healthSourceRef.current = hs
+
+    const rs = new Cesium.CustomDataSource('route')
+    viewer.dataSources.add(rs)
+    routeSourceRef.current = rs
+
     const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas)
     handler.setInputAction(
       (e: Cesium.ScreenSpaceEventHandler.PositionedEvent) => {
@@ -113,19 +146,20 @@ export default function CesiumViewer() {
           const vehicle = getVehicleById(entityId)
           if (vehicle) {
             selectVehicle(vehicle)
-            // Fly camera to vehicle
+            trackingVehicleRef.current = vehicle.id
+            // Position camera behind vehicle so it appears in the upper half
+            const { destination, headingRad } = followCameraFor(
+              vehicle.lat, vehicle.lng, vehicle.heading
+            )
             viewer.camera.flyTo({
-              destination: Cesium.Cartesian3.fromDegrees(vehicle.lng, vehicle.lat, 3000),
-              orientation: {
-                heading: viewer.camera.heading,
-                pitch: Cesium.Math.toRadians(-35),
-                roll: 0,
-              },
-              duration: 1.2,
+              destination,
+              orientation: { heading: headingRad, pitch: Cesium.Math.toRadians(-50), roll: 0 },
+              duration: 1.5,
             })
           }
         } else {
           selectVehicle(null)
+          trackingVehicleRef.current = null
         }
       },
       Cesium.ScreenSpaceEventType.LEFT_CLICK
@@ -135,28 +169,61 @@ export default function CesiumViewer() {
       handler.destroy()
       if (viewer && !viewer.isDestroyed()) {
         clearEntities(ds)
+        clearDelayRings(hs)
+        clearCorridorLines(hs)
+        hideSelectedRoute(rs)
         viewer.destroy()
       }
       viewerRef.current = null
       dataSourceRef.current = null
+      healthSourceRef.current = null
+      routeSourceRef.current = null
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Sync vehicles when data or filters change
+  // Sync vehicles + health overlays + camera follow on each poll
   useEffect(() => {
-    if (!dataSourceRef.current) return
+    if (!dataSourceRef.current || !healthSourceRef.current) return
     syncVehicles(dataSourceRef.current, vehicles, filters)
+    syncDelayRings(healthSourceRef.current, vehicles)
+    syncCorridorLines(healthSourceRef.current, vehicles)
+
+    // Follow selected vehicle
+    const trackingId = trackingVehicleRef.current
+    if (trackingId) {
+      const updated = vehicles.find((v) => v.id === trackingId)
+      if (updated) {
+        if (routeSourceRef.current) updateSelectedRoutePulse(routeSourceRef.current, updated)
+
+        const viewer = viewerRef.current
+        if (viewer && !viewer.isDestroyed()) {
+          const { destination, headingRad } = followCameraFor(
+            updated.lat, updated.lng, updated.heading
+          )
+          // Slow drift — vehicle updates every 20s so 5s duration feels smooth
+          viewer.camera.flyTo({
+            destination,
+            orientation: { heading: headingRad, pitch: Cesium.Math.toRadians(-50), roll: 0 },
+            duration: 5.0,
+          })
+        }
+      }
+    }
   }, [vehicles, filters])
 
-  // Highlight selected vehicle
+  // Show / hide route overlay when selection changes
   useEffect(() => {
     const prev = prevSelectedRef.current
     if (prev) unhighlightEntity(prev)
+
     if (selectedVehicle) {
       highlightEntity(selectedVehicle.id)
       prevSelectedRef.current = selectedVehicle.id
+      if (routeSourceRef.current) showSelectedRoute(routeSourceRef.current, selectedVehicle)
     } else {
       prevSelectedRef.current = null
+      trackingVehicleRef.current = null
+      if (routeSourceRef.current) hideSelectedRoute(routeSourceRef.current)
     }
   }, [selectedVehicle])
 

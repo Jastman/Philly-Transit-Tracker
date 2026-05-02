@@ -39,7 +39,7 @@ export const POLL_INTERVAL_ALERTS = 60_000
 export const PHILLY_CENTER = {
   lat: 39.9524,
   lng: -75.1636,
-  alt: 1500,
+  alt: 2500,
 }
 
 export const SASSY_LINES = [

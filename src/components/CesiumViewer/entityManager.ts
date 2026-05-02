@@ -37,7 +37,8 @@ export function syncVehicles(
 
   for (const vehicle of filtered) {
     const newPos = Cesium.Cartesian3.fromDegrees(vehicle.lng, vehicle.lat, 5)
-    const rotation = Cesium.Math.toRadians(vehicle.heading)
+    // PATCO is a symmetric diamond — rotation looks wrong at any angle, so skip it
+    const rotation = vehicle.mode === 'patco' ? 0 : Cesium.Math.toRadians(vehicle.heading)
     const image = getBillboardImage(vehicle.mode, false)
 
     vehicleDataMap.set(vehicle.id, vehicle)

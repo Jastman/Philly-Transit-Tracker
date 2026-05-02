@@ -97,46 +97,60 @@ function mapTransitViewVehicle(
 
 // ─── Fetch all buses and trolleys in one shot ────────────────────────────────
 
+function parseSurfaceResponse(raw: unknown, out: Vehicle[]): void {
+  // Handle flat array (api.septa.org returns all vehicles as a single array)
+  if (Array.isArray(raw)) {
+    for (let i = 0; i < raw.length; i++) {
+      const v = raw[i] as TransitViewVehicle
+      const route = v.route_id ?? v.RouteID ?? 'unknown'
+      const mapped = mapTransitViewVehicle(v, route, modeForRoute(route, 'bus'), i)
+      if (mapped) out.push(mapped)
+    }
+    return
+  }
+  // Handle wrapped formats: {data: [...]} or {vehicles: [...]}
+  if (raw && typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>
+    if (Array.isArray(obj.data)) { parseSurfaceResponse(obj.data, out); return }
+    if (Array.isArray(obj.vehicles)) { parseSurfaceResponse(obj.vehicles, out); return }
+  }
+  // Handle object-keyed format: {bus: [...], trolley: [...], routes: {...}}
+  const entries = extractVehicleEntries(raw as TransitViewAllResponse)
+  for (const { vehicles, route, mode } of entries) {
+    for (let i = 0; i < vehicles.length; i++) {
+      const v = mapTransitViewVehicle(vehicles[i], route, mode, i)
+      if (v) out.push(v)
+    }
+  }
+}
+
 export async function fetchAllSurfaceVehicles(): Promise<Vehicle[]> {
   const results: Vehicle[] = []
 
-  // Try new api.septa.org TransitViewAll first
-  try {
-    const res = await fetch(`${SEPTA_API_BASE}/TransitView/all`, {
-      signal: AbortSignal.timeout(10000),
-    })
-    if (res.ok) {
-      const data: TransitViewAllResponse = await res.json()
-      const entries = extractVehicleEntries(data)
-      for (const { vehicles, route, mode } of entries) {
-        for (let i = 0; i < vehicles.length; i++) {
-          const v = mapTransitViewVehicle(vehicles[i], route, mode, i)
-          if (v) results.push(v)
-        }
-      }
+  for (const url of [
+    `${SEPTA_API_BASE}/TransitView/all`,
+    'https://corsproxy.io/?https://www3.septa.org/api/TransitViewAll/index.php',
+  ]) {
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(10000) })
+      if (!res.ok) continue
+      const raw: unknown = await res.json()
+      parseSurfaceResponse(raw, results)
       if (results.length > 0) return results
-    }
-  } catch { /* fall through */ }
-
-  // Fallback: legacy www3.septa.org TransitViewAll
-  try {
-    const res = await fetch(
-      'https://corsproxy.io/?https://www3.septa.org/api/TransitViewAll/index.php',
-      { signal: AbortSignal.timeout(10000) }
-    )
-    if (res.ok) {
-      const data: TransitViewAllResponse = await res.json()
-      const entries = extractVehicleEntries(data)
-      for (const { vehicles, route, mode } of entries) {
-        for (let i = 0; i < vehicles.length; i++) {
-          const v = mapTransitViewVehicle(vehicles[i], route, mode, i)
-          if (v) results.push(v)
-        }
-      }
-    }
-  } catch { /* give up */ }
+    } catch { /* try next */ }
+  }
 
   return results
+}
+
+// Module-scope route → mode mapping (shared by both parsers)
+const TROLLEY_ROUTES = new Set(['10', '11', '13', '15', '34', '36'])
+const SUBWAY_ROUTES = new Set(['BSL', 'MFL'])
+
+function modeForRoute(routeId: string, defaultMode: TransitMode): TransitMode {
+  if (SUBWAY_ROUTES.has(routeId)) return 'subway'
+  if (TROLLEY_ROUTES.has(routeId)) return 'trolley'
+  return defaultMode
 }
 
 interface VehicleEntry {
@@ -147,16 +161,6 @@ interface VehicleEntry {
 
 function extractVehicleEntries(data: TransitViewAllResponse): VehicleEntry[] {
   const out: VehicleEntry[] = []
-
-  // Handle flat arrays by key (bus / trolley / train / el)
-  const TROLLEY_ROUTES = new Set(['10', '11', '13', '15', '34', '36'])
-  const SUBWAY_ROUTES = new Set(['BSL', 'MFL'])
-
-  function modeForRoute(routeId: string, defaultMode: TransitMode): TransitMode {
-    if (SUBWAY_ROUTES.has(routeId)) return 'subway'
-    if (TROLLEY_ROUTES.has(routeId)) return 'trolley'
-    return defaultMode
-  }
 
   function processArray(arr: TransitViewVehicle[], defaultMode: TransitMode) {
     // Group by route_id if available, else treat as single group
